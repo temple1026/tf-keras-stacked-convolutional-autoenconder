@@ -1,0 +1,5 @@
+.env/*
+.vscode/*
+
+*.png
+*.hdf5
