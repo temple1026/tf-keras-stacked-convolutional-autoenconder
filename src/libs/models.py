@@ -1,9 +1,9 @@
 # encoding: UTF-8
 
 from tensorflow.keras import Model
-from tensorflow.keras.layers import (Conv2D, Conv2DTranspose,
-                                     Input, MaxPooling2D, Reshape,  # UpSampling2D,
-                                     BatchNormalization)
+from tensorflow.keras.layers import (BatchNormalization,  # UpSampling2D,
+                                     Conv2D, Conv2DTranspose, Input,
+                                     MaxPooling2D, Reshape)
 
 
 def getConvBlock(layer_input, upconv=False, name="", **kwargs):
