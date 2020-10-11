@@ -5,38 +5,26 @@ import argparse
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import Model
-from tensorflow.keras.layers import (Conv2D, Conv2DTranspose,
-                                     Input, MaxPooling2D, Reshape, UpSampling2D,
-                                     BatchNormalization)
+
 from tensorflow.keras.callbacks import ModelCheckpoint
 
 import matplotlib.pyplot as plt
 
-SEED = 0
-LIST_NN_PARAMS = [
-    # {"filters": 8, "kernel_size": (3, 3), "activation": "relu", "strides": (1, 1), "padding": "same", "pooling": False},
-    # {"filters": 8, "kernel_size": (3, 3), "activation": "relu", "strides": (1, 1), "padding": "same", "pooling": False},
-    {"filters": 8, "kernel_size": (3, 3), "activation": "relu", "strides": (1, 1), "padding": "same", "pooling": True},
-    # {"filters": 16, "kernel_size": (3, 3), "activation": "relu", "strides": (1, 1), "padding": "same", "pooling": False},
-    # {"filters": 16, "kernel_size": (3, 3), "activation": "relu", "strides": (1, 1), "padding": "same", "pooling": False},
-    {"filters": 16, "kernel_size": (3, 3), "activation": "relu", "strides": (1, 1), "padding": "same", "pooling": True},
-    {"filters": 1, "kernel_size": (3, 3), "activation": "relu", "strides": (1, 1), "padding": "same", "pooling": False}
-]
-
-PARAMS_AE_MODEL = {
-    i: params for i, params in enumerate(LIST_NN_PARAMS)
-}
+from libs.models import loadStackedModel
+from libs.utilities import addNoise
+from config import SEED, PARAMS_AE_MODEL, DIR_DST
 
 
-def setSeed(seed, mode_ops):
+def setSeed(seed, keep_repro=True):
     os.environ['PYTHONHASHSEED'] = '0'
 
+    # Set seed
     tf.random.set_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
-    if mode_ops:
+    # Settings for the reproducibility in Tensorflow 2.3.
+    if keep_repro:
 
         os.environ['TF_DETERMINISTIC_OPS'] = '1'
         os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
@@ -53,74 +41,22 @@ def setSeed(seed, mode_ops):
         tf.config.threading.set_intra_op_parallelism_threads(max_workers)
 
 
-def getConvBlock(layer_input, upconv=False, name="", **kwargs):
-    params_layer = kwargs["params_layer"].copy()
-
-    check_pooling = params_layer.pop("pooling")
-
-    if upconv:
-        layers_hidden = Conv2D(name=f"{name}_conv", **params_layer)(layer_input)
-        layer_output = UpSampling2D(size=(2, 2))(layers_hidden) if check_pooling else layers_hidden
-
-    else:
-        layers_hidden = Conv2D(name=f"{name}_conv", **params_layer)(layer_input)
-        layer_output = MaxPooling2D((2, 2), name=f"{name}_pool", padding="same")(layers_hidden) if check_pooling else layers_hidden
-
-    return layer_output
-
-
-def loadStackedModel(width, height, depth, params_model=PARAMS_AE_MODEL) -> Model:
+def replaceLayers(model):
     """
-
+    Not implemented yet.
     """
-    # Add common layers.
-    layer_input = Input(shape=(width, height), name="input0")
-    layers_hidden = Reshape(target_shape=(width, height, 1), name="reshape0")(layer_input)
-    layers_hidden = BatchNormalization(name="bn0")(layers_hidden)
-
-    # Add convolutional and pooling layers.
-    for d in range(depth):
-        layers_hidden = getConvBlock(layer_input=layers_hidden, name=f"enc{d}", params_layer=params_model[d])
-
-    # Add deconvolutional layers
-    for d in reversed(range(depth - 1)):
-        layers_hidden = getConvBlock(layer_input=layers_hidden, upconv=True, name=f"dec{d}", params_layer=params_model[d])
-
-    # if the last layer is pooled, choose stride (2, 2).
-    strides = (2, 2) if params_model[depth - 1]["pooling"] else (1, 1)
-
-    # Add a layer for reconstruction
-    layer_output = Conv2DTranspose(filters=1, kernel_size=(3, 3), strides=strides, padding="same", activation="sigmoid", name="output")(layers_hidden)
-
-    return Model(inputs=layer_input, outputs=layer_output)
-
-
-def calPower(data):
-    power = np.sum(data**2, keepdims=True)
-    return power
-
-
-def addNoise(imgs, noises, snr):
-    p_imgs = []
-    p_noises = []
-    for img, noise in zip(imgs, noises):
-        p_imgs.append(calPower(img))
-        p_noises.append(calPower(noise))
-
-    a = np.sqrt(np.array(p_imgs)/(np.array(p_noises) * np.power(10.0, snr/10.0)))
-
-    imgs_out = imgs + a*noises
-
-    return imgs_out
+    return model
 
 
 def main():
-    setSeed(0, 1)
+    # Set seeds
+    setSeed(SEED)
 
-    # VRAMを無駄に確保しないように設定
+    # Set the limitation of VRAM
     physical_devices = tf.config.experimental.list_physical_devices('GPU')
     tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
+    # Define arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--epochs", default=20, type=int)
     parser.add_argument("-b", "--batch_size", default=100, type=int)
@@ -133,39 +69,48 @@ def main():
     stacked = args.stacked
     snr = args.snr
 
-    mnist = tf.keras.datasets.mnist
-    (trainX, trainY), (testX, testY) = mnist.load_data()
+    # Load MNIST
+    (trainX, trainY), (testX, testY) = tf.keras.datasets.mnist.load_data()
 
+    # Get the size of image
     width, height = trainX.shape[1:]
 
+    # Add the random noise into inputs and ground truth.
     trainX_corrupted = addNoise(trainX, np.random.random(size=(trainX.shape)), snr=snr)
     testX_corrupted = addNoise(testX, np.random.random(size=(testX.shape)), snr=snr)
 
+    # 0-1 Normalize
     trainX_corrupted = trainX_corrupted / 255.0
     testX_corrupted = testX_corrupted / 255.0
-
     trainX = trainX / 255.0
+    testX = testX / 255.0
 
+    # Define the number of layers
     depth = len(PARAMS_AE_MODEL.keys())
 
-    model_trained = None
-
-    dist_path = os.path.join("dist", "models")
-    os.makedirs(dist_path, exist_ok=True)
+    # define the path to dst
+    dst_path_base = os.path.join(DIR_DST, "stacked" if stacked else "no-stacked") + f"_snr{snr}"
+    dst_path_model = os.path.join(dst_path_base, "models")
+    os.makedirs(dst_path_model, exist_ok=True)
 
     if not stacked:
         # Training for non-stacked convolutional denoising autoencoder
-        model = loadStackedModel(width, height, depth)
+
+        # Load model
+        model = loadStackedModel(width, height, depth, PARAMS_AE_MODEL)
         model.compile(optimizer=tf.keras.optimizers.Adam(lr=1e-3), loss="mse")
         model.summary()
-        dist_save = os.path.join(dist_path, "best_no_stacked.hdf5")
-        mc = ModelCheckpoint(dist_save, save_best_only=True, mode='min')
+        dst_save = os.path.join(dst_path_model, "best_no_stacked.hdf5")
+        mc = ModelCheckpoint(dst_save, save_best_only=True, mode='min')
         model.fit(x=trainX_corrupted, y=trainX, batch_size=batch_size, shuffle=True, validation_split=0.1, epochs=epochs, callbacks=[mc])
 
     else:
         # Train depth + 1 times. At depth time is training for all layers.
+
+        model_trained = None
+
         for d in range(depth + 1):
-            model = loadStackedModel(width, height, d+1 if d+1 <= depth else depth)
+            model = loadStackedModel(width, height, d+1 if d+1 <= depth else depth, PARAMS_AE_MODEL)
             model.compile(optimizer=tf.keras.optimizers.Adam(lr=1e-3), loss="mse")
 
             if model_trained is not None:
@@ -174,6 +119,7 @@ def main():
                 for idx, layer in enumerate(model.layers):
                     # print(idx, layer)
                     if layer.name in names_trained_layer:
+                        # if the layer.name of model exist in trained model
                         try:
                             idx_trained_layer = names_trained_layer[layer.name]
                             weights_trained = model_trained.layers[idx_trained_layer].get_weights()
@@ -190,30 +136,41 @@ def main():
 
             if d == depth:
                 """
-                他の学習をする場合にはここで層の入れ替えをする
+                Replace layers in advance if you run as another task. e.g) classification
                 """
+                # replaceLayers(model)
+                y = trainX
+            else:
+                y = trainX
 
             model.compile(optimizer=tf.keras.optimizers.Adam(lr=1e-3), loss="mse")
             model.summary()
 
-            dist_save = os.path.join(dist_path, f"best_stacked_{d}.hdf5")
-            mc = ModelCheckpoint(dist_save, save_best_only=True, mode='min')
-            model.fit(x=trainX_corrupted, y=trainX, batch_size=batch_size, shuffle=True, validation_split=0.1, epochs=epochs, callbacks=[mc])
+            # Define the path to model
+            dst_save = os.path.join(dst_path_model, f"best_stacked_{d}.hdf5")
 
+            # Degine callbacks
+            mc = ModelCheckpoint(dst_save, save_best_only=True, mode='min')
+
+            # Train
+            model.fit(x=trainX_corrupted, y=y, batch_size=batch_size, shuffle=True, validation_split=0.1, epochs=epochs, callbacks=[mc])
+
+            # Save the model as trained model.
             model_trained = model
 
             del model
 
     # evaluate
-    model = tf.keras.models.load_model(dist_save)
+    model = tf.keras.models.load_model(dst_save)
+    model.evaluate(x=testX_corrupted, y=testX)
     results = model.predict(x=testX_corrupted)
 
     idx_target = 0
-    dir_img = "img"
+    dir_img = os.path.join(dst_path_base, "img")
     os.makedirs(dir_img, exist_ok=True)
 
     plt.cla()
-    plt.imshow(np.reshape(results[idx_target], newshape=(width, height)), cmap="gray")
+    plt.imshow(np.reshape(results[idx_target] * 255.0, newshape=(width, height)), cmap="gray")
     plt.savefig(os.path.join(dir_img, f"pred_{idx_target}.png"))
 
     plt.cla()
@@ -221,7 +178,7 @@ def main():
     plt.savefig(os.path.join(dir_img, f"testX_corrupted_{idx_target}.png"))
 
     plt.cla()
-    plt.imshow(np.reshape(testX[idx_target], newshape=(width, height)), cmap="gray")
+    plt.imshow(np.reshape(testX[idx_target] * 255.0, newshape=(width, height)), cmap="gray")
     plt.savefig(os.path.join(dir_img, f"testX_{idx_target}.png"))
 
     plt.cla()
